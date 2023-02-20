@@ -72,14 +72,14 @@ def main():
     parser.add_argument('--num-workers', type=int, default=4,
                         help='number of workers')
     parser.add_argument('--dataset', default='cifar10', type=str,
-                        choices=['cifar10', 'cifar100'],
+                        choices=['cifar10', 'cifar100','xray20'],
                         help='dataset name')
     parser.add_argument('--num-labeled', type=int, default=4000,
                         help='number of labeled data')
     parser.add_argument("--expand-labels", action="store_true",
                         help="expand labels to fit eval steps")
     parser.add_argument('--arch', default='wideresnet', type=str,
-                        choices=['wideresnet', 'resnext'],
+                        choices=['wideresnet', 'resnext', 'resnet18'],
                         help='dataset name')
     parser.add_argument('--total-steps', default=2**20, type=int,
                         help='number of total steps to run')
@@ -89,7 +89,7 @@ def main():
                         help='manual epoch number (useful on restarts)')
     parser.add_argument('--batch-size', default=64, type=int,
                         help='train batchsize')
-    parser.add_argument('--lr', '--learning-rate', default=0.03, type=float,
+    parser.add_argument('--lr', '--learning-rate', default=1e-4, type=float,
                         help='initial learning rate')
     parser.add_argument('--warmup', default=0, type=float,
                         help='warmup epochs (unlabeled data based)')
@@ -141,6 +141,15 @@ def main():
                                          depth=args.model_depth,
                                          width=args.model_width,
                                          num_classes=args.num_classes)
+        
+        elif args.arch =='resnet18':
+            import torchvision.models as models_t
+            import torch.nn as nn
+
+            model = models_t.resnet18(pretrained=True)
+            n_features = model.fc.in_features
+            model.fc = nn.Linear(n_features, args.num_classes)
+
         logger.info("Total params: {:.2f}M".format(
             sum(p.numel() for p in model.parameters())/1e6))
         return model
@@ -198,13 +207,23 @@ def main():
             args.model_cardinality = 8
             args.model_depth = 29
             args.model_width = 64
+    
+    elif args.dataset == 'xray20':
+        args.num_classes = 3
+        if args.arch == 'wideresnet':
+            args.model_depth = 28
+            args.model_width = 8
+        elif args.arch == 'resnext':
+            args.model_cardinality = 8
+            args.model_depth = 29
+            args.model_width = 64
 
     if args.local_rank not in [-1, 0]:
         torch.distributed.barrier()
 
     labeled_dataset, unlabeled_dataset, test_dataset = DATASET_GETTERS[args.dataset](
         args, './data')
-
+    print("poop",len(labeled_dataset))
     if args.local_rank == 0:
         torch.distributed.barrier()
 
@@ -216,7 +235,7 @@ def main():
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         drop_last=True)
-
+    print("poop2",len(labeled_trainloader))
     unlabeled_trainloader = DataLoader(
         unlabeled_dataset,
         sampler=train_sampler(unlabeled_dataset),
@@ -227,8 +246,8 @@ def main():
     test_loader = DataLoader(
         test_dataset,
         sampler=SequentialSampler(test_dataset),
-        batch_size=args.batch_size,
-        num_workers=args.num_workers)
+        batch_size=len(test_dataset),
+        num_workers=0)
 
     if args.local_rank not in [-1, 0]:
         torch.distributed.barrier()
@@ -327,7 +346,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
                          disable=args.local_rank not in [-1, 0])
         for batch_idx in range(args.eval_step):
             try:
-                inputs_x, targets_x = labeled_iter.next()
+                inputs_x, targets_x = next(labeled_iter)
                 # error occurs ↓
                 # inputs_x, targets_x = next(labeled_iter)
             except:
@@ -335,12 +354,12 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
                     labeled_epoch += 1
                     labeled_trainloader.sampler.set_epoch(labeled_epoch)
                 labeled_iter = iter(labeled_trainloader)
-                inputs_x, targets_x = labeled_iter.next()
+                inputs_x, targets_x = next(labeled_iter)
                 # error occurs ↓
                 # inputs_x, targets_x = next(labeled_iter)
 
             try:
-                (inputs_u_w, inputs_u_s), _ = unlabeled_iter.next()
+                (inputs_u_w, inputs_u_s), _ = next(unlabeled_iter)
                 # error occurs ↓
                 # (inputs_u_w, inputs_u_s), _ = next(unlabeled_iter)
             except:
@@ -348,7 +367,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
                     unlabeled_epoch += 1
                     unlabeled_trainloader.sampler.set_epoch(unlabeled_epoch)
                 unlabeled_iter = iter(unlabeled_trainloader)
-                (inputs_u_w, inputs_u_s), _ = unlabeled_iter.next()
+                (inputs_u_w, inputs_u_s), _ = next(unlabeled_iter)
                 # error occurs ↓
                 # (inputs_u_w, inputs_u_s), _ = next(unlabeled_iter)
 
@@ -363,6 +382,8 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
             logits_u_w, logits_u_s = logits[batch_size:].chunk(2)
             del logits
 
+            # print(logits_x)
+            # print(targets_x)
             Lx = F.cross_entropy(logits_x, targets_x, reduction='mean')
 
             pseudo_label = torch.softmax(logits_u_w.detach()/args.T, dim=-1)
@@ -463,17 +484,27 @@ def test(args, test_loader, model, epoch):
         test_loader = tqdm(test_loader,
                            disable=args.local_rank not in [-1, 0])
 
+    preds = []
+    outputs_lab = []        
     with torch.no_grad():
+
         for batch_idx, (inputs, targets) in enumerate(test_loader):
+            # print('hi')
+            # return None
             data_time.update(time.time() - end)
-            model.eval()
+            # model.eval()
 
             inputs = inputs.to(args.device)
             targets = targets.to(args.device)
             outputs = model(inputs)
             loss = F.cross_entropy(outputs, targets)
+            print(targets)
+            print(outputs.argmax(-1))
 
-            prec1, prec5 = accuracy(outputs, targets, topk=(1, 5))
+            preds.append(targets)
+            outputs_lab.append(outputs.argmax(-1))
+
+            prec1, prec5 = accuracy(outputs, targets, topk=(1, 1))
             losses.update(loss.item(), inputs.shape[0])
             top1.update(prec1.item(), inputs.shape[0])
             top5.update(prec5.item(), inputs.shape[0])
@@ -492,8 +523,19 @@ def test(args, test_loader, model, epoch):
         if not args.no_progress:
             test_loader.close()
 
+    preds = torch.cat(preds)
+    outputs = torch.cat(outputs_lab)
+    from sklearn.metrics import accuracy_score
+    from sklearn.metrics import f1_score
+    overall_acc = accuracy_score(outputs.flatten().cpu(), preds.flatten().cpu())
+    overall_f1_macro = f1_score(outputs.flatten().cpu(), preds.flatten().cpu(), average='macro')
+    overall_f1_micro = f1_score(outputs.flatten().cpu(), preds.flatten().cpu(), average='micro')
+
     logger.info("top-1 acc: {:.2f}".format(top1.avg))
     logger.info("top-5 acc: {:.2f}".format(top5.avg))
+    logger.info(f"f1_score_micro: {overall_f1_micro}")
+    logger.info(f"f1_score_macro: {overall_f1_macro}")
+    logger.info(f"overall acc: {overall_acc}")
     return losses.avg, top1.avg
 
 

@@ -5,7 +5,7 @@ import numpy as np
 from PIL import Image
 from torchvision import datasets
 from torchvision import transforms
-
+from .custom import DataPreprocess,ClassificationDataset
 from .randaugment import RandAugmentMC
 
 logger = logging.getLogger(__name__)
@@ -83,6 +83,30 @@ def get_cifar100(args, root):
 
     return train_labeled_dataset, train_unlabeled_dataset, test_dataset
 
+def get_xray20(args ,root):
+    transform_labeled = transforms.Compose([
+    transforms.Resize(256),
+    transforms.RandomHorizontalFlip(),
+    transforms.RandomCrop(size=256,
+                            padding=int(256*0.125),
+                            padding_mode='reflect'),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=cifar100_mean, std=cifar100_std)])
+
+    transform_val = transforms.Compose([
+    transforms.Resize(256),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=cifar100_mean, std=cifar100_std)])
+
+    preprocess = DataPreprocess('/home/ubuntu/adithya/temp/EAMLA/FixMatch-pytorch/diseases')
+    print(len(preprocess.train_data))
+    train_dataset = ClassificationDataset(preprocess.train_data,transform=transform_labeled)
+    print(f"train data:{len(train_dataset)}")
+    train_unlabeled_dataset = ClassificationDataset(preprocess.val_data,transform=TransformFixMatch(mean=cifar100_mean, std=cifar100_std))
+    # train_unlabeled_dataset = ClassificationDataset(preprocess.val_data,transform_labeled)
+    test_dataset = ClassificationDataset(preprocess.test_data, transform = transform_val)
+
+    return train_dataset, train_unlabeled_dataset, test_dataset
 
 def x_u_split(args, labels):
     label_per_class = args.num_labeled // args.num_classes
@@ -109,15 +133,16 @@ class TransformFixMatch(object):
     def __init__(self, mean, std):
         self.weak = transforms.Compose([
             transforms.RandomHorizontalFlip(),
-            transforms.RandomCrop(size=32,
-                                  padding=int(32*0.125),
+            transforms.RandomCrop(size=256,
+                                  padding=int(256*0.125),
                                   padding_mode='reflect')])
         self.strong = transforms.Compose([
             transforms.RandomHorizontalFlip(),
-            transforms.RandomCrop(size=32,
-                                  padding=int(32*0.125),
+            transforms.RandomCrop(size=256,
+                                  padding=int(256*0.125),
                                   padding_mode='reflect'),
             RandAugmentMC(n=2, m=10)])
+        # self.strong=self.weak
         self.normalize = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize(mean=mean, std=std)])
@@ -179,4 +204,5 @@ class CIFAR100SSL(datasets.CIFAR100):
 
 
 DATASET_GETTERS = {'cifar10': get_cifar10,
-                   'cifar100': get_cifar100}
+                   'cifar100': get_cifar100,
+                   'xray20': get_xray20}
